@@ -12,17 +12,20 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from cloudflare_ai import generate_reply
+from cloudflare_ai import generate_reply, start_ai_client, close_ai_client
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-TOKEN = os.environ["DISCORD_TOKEN"]
-GUILD_ID = int(os.environ["GUILD_ID"])
-OWNER_ID = int(os.environ["OWNER_ID"])
+TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+if not TOKEN or TOKEN.startswith("replace_"):
+    raise SystemExit("Set your NEW Discord bot token as DISCORD_TOKEN in private host variables. Never commit or share it.")
+GUILD_ID = int(os.getenv("GUILD_ID", "1559829257952174192"))
+OWNER_ID = int(os.getenv("OWNER_ID", "1500253920918900883"))
 MEMBER_ROLE_ID = 1559829257952174199
 STAFF_ROLE_ID = 1559829258325594149
-AI_RESPONSE_COOLDOWN_SECONDS = 12
+AI_RESPONSE_COOLDOWN_SECONDS = 2.0
 ai_last_response = {}
+ai_busy_channels = set()
 TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "0"))
 DB_PATH = os.getenv("DB_PATH", "bot.sqlite3")
 COLOR = discord.Color.from_rgb(255, 185, 40)
@@ -63,7 +66,19 @@ async def ai_reply(question, context=""):
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+class TeamLBBot(commands.Bot):
+    async def setup_hook(self):
+        await super().setup_hook()
+        await start_ai_client()
+
+    async def close(self):
+        try:
+            await close_ai_client()
+        finally:
+            await super().close()
+
+
+bot = TeamLBBot(command_prefix="!", intents=intents)
 
 class GiveawayView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -276,14 +291,25 @@ async def on_message(message):
             db.execute("UPDATE applications SET answers=substr(answers || ?,1,12000) WHERE channel_id=?",
                        ("\n" + message.content[:1000], message.channel.id))
             db.commit()
-        # One inference per ticket every 12 seconds protects the shared free quota.
-        last_reply = ai_last_response.get(message.channel.id, 0)
-        if time.monotonic() - last_reply < AI_RESPONSE_COOLDOWN_SECONDS:
+        # Pause AI if the member has requested a human, and avoid overlap in a ticket.
+        if row["human_requested"]:
             return
-        ai_last_response[message.channel.id] = time.monotonic()
-        async with message.channel.typing():
-            answer = await ai_reply(message.content, f"Kind: {row['kind']}. Initial submission: {row['summary']}.")
-        await message.channel.send(answer, allowed_mentions=discord.AllowedMentions.none())
+        channel_id = message.channel.id
+        time_now = time.monotonic()
+        if (channel_id in ai_busy_channels or
+                time_now - ai_last_response.get(channel_id, 0) < AI_RESPONSE_COOLDOWN_SECONDS):
+            return
+        ai_busy_channels.add(channel_id)
+        ai_last_response[channel_id] = time_now
+        try:
+            async with message.channel.typing():
+                answer = await ai_reply(
+                    message.content,
+                    f"Kind: {row['kind']}. Initial submission: {row['summary']}."
+                )
+            await message.channel.send(answer, allowed_mentions=discord.AllowedMentions.none())
+        finally:
+            ai_busy_channels.discard(channel_id)
 
 @tasks.loop(seconds=30)
 async def maintenance():
@@ -334,4 +360,9 @@ async def on_ready():
         bot._initialized=True
     logging.info("Connected as %s",bot.user)
 
-bot.run(TOKEN)
+def main():
+    bot.run(TOKEN)
+
+
+if __name__ == "__main__":
+    main()
