@@ -439,6 +439,250 @@ def verification_panel(guild_id):
     return embed, view
 
 
+
+def find_unverified_role(guild):
+    return next(
+        (role for role in guild.roles
+         if not role.managed and role.name.casefold() == UNVERIFIED_ROLE_NAME.casefold()),
+        None,
+    )
+
+
+def find_verification_channel(guild):
+    """Reuse the existing verification text channel instead of making duplicates."""
+    for name in (VERIFY_CHANNEL_NAME, "verification", "verify-here"):
+        channel = discord.utils.get(guild.text_channels, name=name)
+        if channel is not None:
+            return channel
+    return None
+
+
+async def ensure_unverified_role(guild):
+    """Create only Unverified. The existing Verified role ID must never be recreated."""
+    role = find_unverified_role(guild)
+    if role:
+        return role
+    async with verification_role_lock:
+        role = find_unverified_role(guild)
+        if role:
+            return role
+        try:
+            role = await guild.create_role(
+                name=UNVERIFIED_ROLE_NAME,
+                permissions=discord.Permissions.none(),
+                hoist=False,
+                mentionable=False,
+                reason="Team lb onboarding: members verify before seeing the server",
+            )
+            logging.info("Created Unverified role %s in Team lb", role.id)
+            return role
+        except discord.Forbidden:
+            logging.error(
+                "Cannot create Unverified role. Give the Wispbyte bot Manage Roles "
+                "and put its bot role above Unverified in Server Settings > Roles."
+            )
+        except discord.HTTPException:
+            logging.exception("Discord could not create Unverified role")
+    return None
+
+
+async def set_verify_visibility(channel, target, allowed, read_only=False, bot_access=False):
+    """Change only the relevant role overwrite, preserving unrelated permissions."""
+    overwrite = channel.overwrites_for(target)
+    desired = {"view_channel": allowed}
+    if read_only:
+        desired.update(
+            send_messages=False, add_reactions=False, read_message_history=True
+        )
+    if bot_access:
+        desired.update(
+            send_messages=True, read_message_history=True, embed_links=True
+        )
+    if all(getattr(overwrite, key) == value for key, value in desired.items()):
+        return False
+    for key, value in desired.items():
+        setattr(overwrite, key, value)
+    try:
+        await channel.set_permissions(
+            target,
+            overwrite=overwrite,
+            reason="Keep Team lb verification visible to Unverified members only",
+        )
+        return True
+    except discord.Forbidden:
+        logging.error(
+            "Cannot adjust verification visibility for #%s: grant Manage Channels",
+            channel.name,
+        )
+    except discord.HTTPException:
+        logging.exception("Unable to update permissions for channel %s", channel.id)
+    return False
+
+
+async def ensure_verification_channel(guild, unverified):
+    verified_role = guild.get_role(MEMBER_ROLE_ID)
+    if verified_role is None:
+        logging.error(
+            "Team lb Verified role %s does not exist. "
+            "Create/fix the original role before setting up verification.",
+            MEMBER_ROLE_ID,
+        )
+        return None
+    channel = find_verification_channel(guild)
+    if channel is None:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=False, send_messages=False
+            ),
+            unverified: discord.PermissionOverwrite(
+                view_channel=True, send_messages=False,
+                add_reactions=False, read_message_history=True,
+            ),
+            verified_role: discord.PermissionOverwrite(view_channel=False),
+        }
+        if guild.me:
+            overwrites[guild.me] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                read_message_history=True, embed_links=True,
+            )
+        try:
+            channel = await guild.create_text_channel(
+                VERIFY_CHANNEL_NAME,
+                topic="Verify with Discord to unlock Team lb. Only Unverified members can see this channel.",
+                overwrites=overwrites,
+                reason="Set up private Unverified-only verification channel",
+            )
+            logging.info("Created Unverified-only verification channel %s", channel.id)
+        except discord.Forbidden:
+            logging.error("Cannot create #verify: the Wispbyte bot needs Manage Channels")
+            return None
+        except discord.HTTPException:
+            logging.exception("Discord could not create #verify")
+            return None
+    else:
+        await set_verify_visibility(channel, guild.default_role, False)
+        await set_verify_visibility(channel, unverified, True, read_only=True)
+        await set_verify_visibility(channel, verified_role, False)
+        if guild.me:
+            await set_verify_visibility(channel, guild.me, True, bot_access=True)
+    bot._verify_channel_id = channel.id
+    return channel
+
+
+async def ensure_verification_panel(channel):
+    """Post the link button once, and remember it across bot restarts."""
+    saved = db.execute(
+        "SELECT channel_id,message_id FROM verification_panels WHERE guild_id=?",
+        (channel.guild.id,),
+    ).fetchone()
+    if saved and saved["channel_id"] == channel.id:
+        try:
+            old = await channel.fetch_message(saved["message_id"])
+            if old.author.id == bot.user.id:
+                return old
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    try:
+        async for existing in channel.history(limit=75):
+            if existing.author.id == bot.user.id and any(
+                embed.title == "✅ Verify your Discord account"
+                for embed in existing.embeds
+            ):
+                with db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO verification_panels VALUES (?,?,?)",
+                        (channel.guild.id, channel.id, existing.id),
+                    )
+                return existing
+    except (discord.Forbidden, discord.HTTPException):
+        logging.warning("Cannot read #%s history to find the verification panel", channel.name)
+
+    embed, view = verification_panel(channel.guild.id)
+    try:
+        posted = await channel.send(
+            embed=embed,
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        with db:
+            db.execute(
+                "INSERT OR REPLACE INTO verification_panels VALUES (?,?,?)",
+                (channel.guild.id, channel.id, posted.id),
+            )
+        return posted
+    except (discord.Forbidden, discord.HTTPException):
+        logging.exception("Could not post the Verify Now panel in #%s", channel.name)
+    return None
+
+
+async def reconcile_verified_role(member, unverified=None):
+    """Give Unverified to people without Verified; remove it once verified."""
+    if member.bot or member.guild.id != GUILD_ID or member.id == OWNER_ID:
+        return False
+    unverified = unverified or find_unverified_role(member.guild)
+    if not unverified:
+        return False
+    has_unverified = any(role.id == unverified.id for role in member.roles)
+    try:
+        if verified(member) and has_unverified:
+            await member.remove_roles(
+                unverified, reason="Member completed Discord verification"
+            )
+            return True
+        if not verified(member) and not has_unverified:
+            await member.add_roles(
+                unverified, reason="New Team lb member must verify"
+            )
+            return True
+    except discord.Forbidden:
+        logging.error(
+            "Cannot manage Unverified role for %s; Wispbyte bot requires "
+            "Manage Roles and a higher bot role",
+            member.id,
+        )
+    except discord.HTTPException:
+        logging.exception("Could not update Unverified role for member %s", member.id)
+    return False
+
+
+async def setup_verification_access(guild):
+    """Provision onboarding once; never delete channels or alter Verified role."""
+    if guild.id != GUILD_ID:
+        return
+    unverified = await ensure_unverified_role(guild)
+    if unverified is None:
+        return
+    channel = await ensure_verification_channel(guild, unverified)
+    if channel is None:
+        return
+
+    # Unverified users should see #verify, not any other existing channel.
+    # Set the Unverified overwrite on categories and channels, preserving all
+    # permissions of other roles. New channels are handled by the create event.
+    updated = 0
+    for other in guild.channels:
+        if other.id != channel.id:
+            if await set_verify_visibility(other, unverified, False):
+                updated += 1
+
+    await ensure_verification_panel(channel)
+    try:
+        if not guild.chunked:
+            await guild.chunk(cache=True)
+    except (discord.HTTPException, asyncio.TimeoutError):
+        logging.warning("Could not fetch every member; new joins still receive Unverified")
+
+    assigned = 0
+    for member in list(guild.members):
+        if await reconcile_verified_role(member, unverified):
+            assigned += 1
+    logging.info(
+        "Verification ready in #%s: protected %s channels, reconciled %s members",
+        channel.name, updated, assigned,
+    )
+
+
 @bot.tree.command(name="verify", description="Open the official Discord verification panel")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def verify_command(interaction: discord.Interaction):
