@@ -63,7 +63,7 @@ class CloudflareAITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(session.calls), 1)
         url, kwargs = session.calls[0]
         self.assertEqual(url, "https://api.cloudflare.com/client/v4/accounts/" + "a" * 32 + "/ai/run/" + ai.DEFAULT_MODEL)
-        self.assertEqual(kwargs["json"]["max_tokens"], 220)
+        self.assertEqual(kwargs["json"]["max_tokens"], ai.MAX_OUTPUT_TOKENS)
         self.assertEqual(kwargs["json"]["messages"][0]["role"], "system")
         self.assertIn("My game crashed", kwargs["json"]["messages"][1]["content"])
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer test-only-token")
@@ -79,8 +79,8 @@ class CloudflareAITests(unittest.IsolatedAsyncioTestCase):
             reply = await ai.generate_reply("Q" * 5000, "C" * 5000)
         self.assertEqual(len(reply), ai.MAX_REPLY_CHARS)
         user_prompt = session.calls[0][1]["json"]["messages"][1]["content"]
-        self.assertEqual(user_prompt.count("Q"), 1800)
-        self.assertEqual(user_prompt.count("C"), 1200)
+        self.assertEqual(user_prompt.count("Q"), ai.INPUT_QUESTION_LIMIT)
+        self.assertEqual(user_prompt.count("C"), ai.INPUT_CONTEXT_LIMIT)
 
     async def test_free_daily_quota_has_clear_message(self):
         env, session = self.configured(FakeResponse(429, {
@@ -107,7 +107,7 @@ class CloudflareAITests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, env, clear=True), patch.object(
             ai.aiohttp, "ClientSession", return_value=session
         ):
-            self.assertEqual(await ai.generate_reply("help"), ai.TEMPORARY_FAILURE)
+            self.assertEqual(await ai.generate_reply("help"), ai.MODEL_TERMS_REQUIRED)
 
     async def test_empty_model_reply_falls_back(self):
         env, session = self.configured(FakeResponse(200, {
@@ -124,6 +124,51 @@ class CloudflareAITests(unittest.IsolatedAsyncioTestCase):
             "CLOUDFLARE_API_TOKEN": "test-only",
         }, clear=True):
             self.assertEqual(await ai.generate_reply("help"), ai.NOT_CONFIGURED)
+
+
+    async def test_public_verification_faq_is_instant_and_free(self):
+        with patch.dict(os.environ, {"GUILD_ID": "1559829257952174192"}, clear=True):
+            reply = await ai.generate_reply("How do I verify?")
+        self.assertIn("https://verify.lb000.xyz/?server=", reply)
+        self.assertNotEqual(reply, ai.NOT_CONFIGURED)
+
+    async def test_fast_model_is_the_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ai.DEFAULT_MODEL, "@cf/meta/llama-3.2-1b-instruct")
+            self.assertLessEqual(ai.MAX_OUTPUT_TOKENS, 160)
+
+    async def test_expensive_model_can_be_selected_explicitly(self):
+        env, session = self.configured(FakeResponse(200, {
+            "success": True, "result": {"response": "Escalate to staff."}
+        }))
+        env["CLOUDFLARE_AI_MODEL"] = "@cf/meta/llama-3.2-3b-instruct"
+        with patch.dict(os.environ, env, clear=True), patch.object(
+            ai.aiohttp, "ClientSession", return_value=session
+        ):
+            answer = await ai.generate_reply("I need help with a dispute")
+        self.assertEqual(answer, "Escalate to staff.")
+        self.assertTrue(session.calls[0][0].endswith("/@cf/meta/llama-3.2-3b-instruct"))
+
+    async def test_client_session_can_start_and_close(self):
+        client = ai.CloudflareAIClient()
+        await client.start()
+        try:
+            self.assertIsNotNone(client._session)
+            self.assertFalse(client._session.closed)
+        finally:
+            await client.close()
+        self.assertIsNone(client._session)
+
+    async def test_capacity_retries_once_then_falls_back(self):
+        env, session = self.configured(FakeResponse(429, {
+            "success": False, "errors": [{"code": 3040, "message": "busy"}]
+        }))
+        with patch.dict(os.environ, env, clear=True), patch.object(
+            ai.aiohttp, "ClientSession", return_value=session
+        ):
+            answer = await ai.generate_reply("Any news?")
+        self.assertEqual(answer, ai.TEMPORARY_FAILURE)
+        self.assertEqual(len(session.calls), 2)
 
 
 if __name__ == "__main__":
