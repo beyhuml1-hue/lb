@@ -685,6 +685,66 @@ async def setup_verification_access(guild):
     )
 
 
+@bot.tree.command(
+    name="verifycheck",
+    description="Owner-only diagnosis of Wispbyte verification roles and permissions",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def verifycheck(interaction: discord.Interaction):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message(
+            "Owner only.", ephemeral=True
+        )
+    guild = interaction.guild
+    if guild is None:
+        return await interaction.response.send_message(
+            "Use this in Team lb.", ephemeral=True
+        )
+    me = guild.me or guild.get_member(bot.user.id)
+    verified_role = guild.get_role(VERIFIED_ROLE_ID)
+    unverified_role = guild.get_role(UNVERIFIED_ROLE_ID)
+    channel = find_verification_channel(guild)
+    lines = [
+        f"**Team lb verification check** — Guild: `{guild.id}`",
+        f"Verified role: {'✅ Found' if verified_role else '❌ Missing'} (`{VERIFIED_ROLE_ID}`)",
+        f"Unverified role: {'✅ Found' if unverified_role else '❌ Missing'} (`{UNVERIFIED_ROLE_ID}`)",
+    ]
+    if me:
+        perms = me.guild_permissions
+        lines.append(f"Wispbyte bot Manage Roles: {'✅' if perms.manage_roles else '❌'}")
+        lines.append(f"Wispbyte bot Manage Channels: {'✅' if perms.manage_channels else '❌'}")
+        for name, role in (("Verified", verified_role), ("Unverified", unverified_role)):
+            if role:
+                lines.append(
+                    f"Wispbyte bot above {name}: "
+                    f"{'✅' if me.top_role > role else '❌'}"
+                )
+    else:
+        lines.append("❌ Cannot inspect Wispbyte bot's guild member.")
+    if channel is None:
+        lines.append("❌ No #verify text channel found.")
+    else:
+        lines.append(f"Verification channel: {channel.mention}")
+        targets = (
+            ("@everyone hidden", guild.default_role, False),
+            ("Unverified allowed", unverified_role, True),
+            ("Verified hidden", verified_role, False),
+        )
+        for title, role, expected in targets:
+            if role:
+                allowed = channel.overwrites_for(role).view_channel is expected
+                lines.append(f"{title}: {'✅' if allowed else '❌'}")
+    lines.append(
+        "**Important:** Cloudflare uses a separate verification bot. "
+        "It must also have Manage Roles and its highest role above both roles; "
+        "this command cannot inspect that bot's secret or Cloudflare deployment."
+    )
+    await interaction.response.send_message(
+        "\n".join(lines), ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 @bot.tree.command(name="verify", description="Open the official Discord verification panel")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def verify_command(interaction: discord.Interaction):
