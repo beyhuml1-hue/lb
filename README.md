@@ -6,8 +6,8 @@ Production Python bot for Team lb: verification panels, private AI-supported tic
 
 | Command | Who can use it | What it does |
 | --- | --- | --- |
-| `/verify` | Everyone | Displays a verification embed with the official Verify Now button; a server manager can post it publicly |
-| `!verify` | Server managers | Posts the same verification embed in the channel |
+| `/verify` | Everyone | Gives unverified members a private link; managers are directed to the restricted #verify channel |
+| `!verify` | Server managers | Confirms that the verification panel is in the restricted #verify channel |
 | `/ticket` | Server managers | Posts the private-ticket panel |
 | `/middleman` | Server managers | Posts the middleman request panel |
 | `/apply type:staff` or `type:stash` | Server managers | Posts the respective application panel |
@@ -56,7 +56,7 @@ Wispbyte private environment settings:
 
 To obtain the AI token: in the [Cloudflare Dashboard](https://dash.cloudflare.com/) open **Workers AI → Use REST API → Create a Workers AI API Token**. Add it **privately** to Wispbyte. The account ID and model alone cannot authenticate requests. The token is never stored in GitHub, and **no OpenAI key is needed**. If the token is absent, the bot starts and ticket replies show a human-support fallback.
 
-On Discord Developer Portal → Bot, enable **Server Members Intent** and **Message Content Intent**. Install the bot with both `bot` and `applications.commands` scopes, plus View/Send Messages, Read Message History, Manage Channels, Embed Links and Attach Files, but **not Administrator**. If the slash-command sync reports `Missing Access`, verify that the installed bot and the `GUILD_ID` are correct.
+On Discord Developer Portal → Bot, enable **Server Members Intent** and **Message Content Intent**. Install the bot with both `bot` and `applications.commands` scopes, plus View/Send Messages, Read Message History, Manage Channels, Manage Roles, Embed Links and Attach Files, but **not Administrator**. If the slash-command sync reports `Missing Access`, verify that the installed bot and the `GUILD_ID` are correct.
 
 ## Cloudflare AI performance and limits
 
@@ -64,9 +64,23 @@ By default the bot uses the lightweight `@cf/meta/llama-3.2-1b-instruct` model a
 
 Cloudflare's free Workers AI allocation is **10,000 Neurons per day per account**, not a guaranteed count of messages. At an illustrative 500 input + 140 output tokens, the 1B model consumes approximately **3.78 Neurons per reply**, enough for roughly **2,600 messages per day** if the account has no other AI usage. More complex messages, concurrency limits and the verification Worker can lower that substantially. The 800-message goal is an estimate and **not guaranteed**. See [Cloudflare Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/).
 
-## Verification-role integration
+## Automatic Verified and Unverified onboarding
 
-`/verify` and `!verify` link to `https://verify.lb000.xyz/?server=1559829257952174192`. The verification Worker is stored in the **separate** `beyhuml1-hue/discord-bot` repository. It now selects the existing Team lb **Member** role `1559829257952174199` for the Team lb guild. This website change still requires **Cloudflare Worker deployment**; updating Wispbyte alone does not publish the website. The verification bot needs **Manage Roles**, and its role must be above Member in the role hierarchy. The Python bot does not handle OAuth tokens.
+Team lb server ID: `1559829257952174192`. Your **existing Verified role** ID is `1559829257952174199`; the bot **reuses it and does not create another Verified role**.
+
+When the Wispbyte bot starts, it automatically:
+
+1. Finds or creates a separate role named **Unverified** with no global permissions.
+2. Finds or creates the `#verify` text channel, hides it from `@everyone` and Verified, gives **Unverified** read-only access, and posts the purple **Verify Now** Discord OAuth button once.
+3. Makes all other current server channels hidden from the **Unverified** role, without changing any other role's permissions. Newly created channels are also hidden from Unverified.
+4. Adds Unverified to new people who are not yet Verified, and reconciles existing server members after bot startup.
+5. Removes Unverified when the existing Verified role is assigned; if Verified is removed later, it restores Unverified.
+
+The verification website `https://verify.lb000.xyz/?server=1559829257952174192` runs in the **separate** `beyhuml1-hue/discord-bot` repository. Its `website/verification.mjs` worker now assigns role `1559829257952174199` and **removes Unverified** after successful OAuth verification. The Python bot additionally cleans up any leftover Unverified role on a Discord member update. `/verify` displays a private link to unverified members; `!verify` and manager `/verify` point to the restricted verification channel rather than publishing the panel elsewhere.
+
+**Required permissions:** Both the Wispbyte bot and the Cloudflare verification bot need **Manage Roles** and must sit **above both Verified and Unverified** in Server Settings → Roles. The Wispbyte bot also needs **Manage Channels**, **View Channels**, **Send Messages**, **Read Message History** and **Embed Links**. Enable **Server Members Intent** and **Message Content Intent**. Without Manage Roles/Channels, automatic setup will log an error instead of silently making an unrestricted verification panel. Discord administrators can still see private channels.
+
+**Deployment:** Pull the new `lb/bot.py` into Wispbyte and restart. Redeploy the Cloudflare `verify-portal` Worker for the updated OAuth role removal to take effect. GitHub passing checks does not automatically deploy either service. Keep your existing private bot tokens and `bot.sqlite3`; never post tokens in chat.
 
 ## Tests and security
 
