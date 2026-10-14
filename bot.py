@@ -690,14 +690,30 @@ async def verify_command(interaction: discord.Interaction):
         return await interaction.response.send_message(
             "Use this command in your Team lb server.", ephemeral=True
         )
-    embed, view = verification_panel(interaction.guild_id)
-    # Managers post a panel for the whole channel. Everyone else gets a private
-    # verification button, keeping public channels clear of repeated panels.
     if interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message("Verification panel posted.", ephemeral=True)
-        await interaction.channel.send(embed=embed, view=view)
+        channel = find_verification_channel(interaction.guild)
+        if channel is None:
+            return await interaction.response.send_message(
+                "The verification channel isn't configured yet. "
+                "The bot needs Manage Roles and Manage Channels; restart it.",
+                ephemeral=True,
+            )
+        posted = await ensure_verification_panel(channel)
+        await interaction.response.send_message(
+            f"Verification is in {channel.mention}."
+            if posted else "Couldn't post the verification panel; check bot permissions.",
+            ephemeral=True,
+        )
+    elif verified(interaction.user):
+        await interaction.response.send_message(
+            "✅ You are already verified and the verification channel is hidden from you.",
+            ephemeral=True,
+        )
     else:
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        embed, view = verification_panel(interaction.guild_id)
+        await interaction.response.send_message(
+            embed=embed, view=view, ephemeral=True,
+        )
 
 
 @bot.tree.command(name="ticket",description="Create the support ticket panel")
@@ -757,11 +773,24 @@ async def on_message(message):
         return await message.channel.send("Owner DM received. For safety I don't execute unrestricted natural-language commands. Use Discord moderation tools and the owner decision buttons.")
     if message.guild and message.content.strip().lower() == "!verify":
         if message.author.guild_permissions.manage_guild:
-            embed, view = verification_panel(message.guild.id)
-            await message.channel.send(embed=embed, view=view)
+            channel = find_verification_channel(message.guild)
+            if channel is None:
+                await message.reply(
+                    "The verification channel isn't ready. Grant Manage Roles "
+                    "and Manage Channels to the bot, then restart.",
+                    mention_author=False,
+                )
+            else:
+                posted = await ensure_verification_panel(channel)
+                await message.reply(
+                    f"Verification panel is in {channel.mention}."
+                    if posted else "Could not post the verification panel.",
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         else:
             await message.reply(
-                "Use **/verify** to get your personal verification link.",
+                "Use **/verify** in the verification channel.",
                 mention_author=False,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -934,6 +963,12 @@ async def on_ready():
                 logging.exception("Team lb slash command sync failed")
         if not maintenance.is_running():
             maintenance.start()
+        guild = bot.get_guild(GUILD_ID)
+        if guild is not None:
+            bot._verification_setup_task = asyncio.create_task(
+                setup_verification_access(guild),
+                name="team-lb-verification-setup",
+            )
         bot._initialized=True
     logging.info("Connected as %s",bot.user)
     logging.info(
@@ -950,6 +985,39 @@ async def on_guild_join(guild):
             logging.info("Synced %d commands after joining Team lb", len(synced))
         except discord.HTTPException:
             logging.exception("Could not sync slash commands after joining Team lb")
+        bot._verification_setup_task = asyncio.create_task(
+            setup_verification_access(guild),
+            name="team-lb-verification-join",
+        )
+
+
+@bot.event
+async def on_member_join(member):
+    if member.guild.id == GUILD_ID and not member.bot:
+        unverified = await ensure_unverified_role(member.guild)
+        if unverified is not None:
+            await reconcile_verified_role(member, unverified)
+
+
+@bot.event
+async def on_member_update(before, after):
+    # The verification Worker assigns the existing Verified role, then removes
+    # Unverified. Also repair roles if a moderator changes them manually.
+    if after.guild.id == GUILD_ID and not after.bot:
+        await reconcile_verified_role(after)
+
+
+@bot.event
+async def on_guild_channel_create(channel):
+    if channel.guild.id != GUILD_ID:
+        return
+    # The setup code creates #verify with Unverified access preconfigured.
+    active = getattr(bot, "_verify_channel_id", None)
+    if channel.id == active or (active is None and channel.name == VERIFY_CHANNEL_NAME):
+        return
+    unverified = find_unverified_role(channel.guild)
+    if unverified:
+        await set_verify_visibility(channel, unverified, False)
 
 def main():
     bot.run(TOKEN)
