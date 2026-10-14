@@ -10,10 +10,14 @@ import io
 from datetime import datetime, timezone
 
 import discord
+import aiohttp
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from cloudflare_ai import generate_reply, start_ai_client, close_ai_client, ai_configured
+from verify_sync import (
+    VerificationSyncError, fetch_site_verifications,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +49,7 @@ CREATE TABLE IF NOT EXISTS applications (channel_id INTEGER PRIMARY KEY, answers
 CREATE TABLE IF NOT EXISTS vouches (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS vouch_cooldowns (voter_id INTEGER PRIMARY KEY, last_vouch INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS verification_panels (guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS verification_site_sync (member_id INTEGER PRIMARY KEY, verified_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS audit (at INTEGER, actor INTEGER, action TEXT, detail TEXT);
 """)
 # Upgrade existing Wispbyte databases in place without deleting open tickets.
@@ -187,11 +192,18 @@ intents.message_content = True
 class TeamLBBot(commands.Bot):
     async def setup_hook(self):
         await super().setup_hook()
+        self.verify_sync_http = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12, connect=4),
+            connector=aiohttp.TCPConnector(limit=4, ttl_dns_cache=300),
+        )
         await start_ai_client()
 
     async def close(self):
         try:
             await close_ai_client()
+            session = getattr(self, "verify_sync_http", None)
+            if session is not None and not session.closed:
+                await session.close()
         finally:
             await super().close()
 
@@ -685,6 +697,140 @@ async def setup_verification_access(guild):
     )
 
 
+async def apply_site_verification(guild, event):
+    """Apply a fresh website OAuth event once; never reinstate manually revoked roles."""
+    record = db.execute(
+        "SELECT verified_at FROM verification_site_sync WHERE member_id=?",
+        (event.member_id,),
+    ).fetchone()
+    if record and record["verified_at"] >= event.verified_at:
+        return "processed"
+
+    verified_role = guild.get_role(VERIFIED_ROLE_ID)
+    unverified_role = guild.get_role(UNVERIFIED_ROLE_ID)
+    if verified_role is None or unverified_role is None:
+        raise VerificationSyncError(
+            "Team lb Verified / Unverified roles were not found by ID."
+        )
+    me = guild.me
+    if me is None or not me.guild_permissions.manage_roles or (
+        me.top_role <= verified_role or me.top_role <= unverified_role
+    ):
+        raise VerificationSyncError(
+            "Wispbyte bot needs Manage Roles and its role above "
+            "Verified and Unverified to synchronize the website."
+        )
+
+    member = guild.get_member(event.member_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(event.member_id)
+        except discord.NotFound:
+            return "not_in_server"
+        except (discord.Forbidden, discord.HTTPException):
+            logging.warning(
+                "Cannot fetch member %s for verification website sync",
+                event.member_id,
+            )
+            return "retry"
+    if member.bot:
+        return "not_member"
+
+    try:
+        changed = False
+        if not verified(member):
+            await member.add_roles(
+                verified_role, reason="Verified with verify.lb000.xyz Discord OAuth"
+            )
+            changed = True
+        if any(role.id == unverified_role.id for role in member.roles):
+            await member.remove_roles(
+                unverified_role, reason="Verified with verify.lb000.xyz Discord OAuth"
+            )
+            changed = True
+    except discord.Forbidden:
+        logging.error(
+            "Discord denied verification roles for member %s. "
+            "Check the Wispbyte bot's Manage Roles permission and role order.",
+            member.id,
+        )
+        return "retry"
+    except discord.HTTPException:
+        logging.exception("Discord role update failed for member %s", member.id)
+        return "retry"
+
+    with db:
+        db.execute(
+            "INSERT INTO verification_site_sync(member_id,verified_at) VALUES (?,?) "
+            "ON CONFLICT(member_id) DO UPDATE SET verified_at=excluded.verified_at",
+            (member.id, event.verified_at),
+        )
+    if changed:
+        logging.info(
+            "Website verification synchronized for Discord member %s", member.id
+        )
+    return "roles_updated" if changed else "already_verified"
+
+
+async def sync_website_verifications(guild):
+    """One authenticated website sync pass, with bounded Discord API operations."""
+    session = getattr(bot, "verify_sync_http", None)
+    if session is None or session.closed:
+        raise VerificationSyncError("Verification HTTP connection is not ready.")
+    events = await fetch_site_verifications(session, guild.id)
+    counts = {
+        "website_records": len(events),
+        "roles_updated": 0,
+        "already_verified": 0,
+        "processed": 0,
+        "not_in_server": 0,
+        "retry": 0,
+    }
+    attempted = 0
+    for event in events:
+        processed = db.execute(
+            "SELECT verified_at FROM verification_site_sync WHERE member_id=?",
+            (event.member_id,),
+        ).fetchone()
+        if processed and processed["verified_at"] >= event.verified_at:
+            counts["processed"] += 1
+            continue
+        if attempted >= 25:
+            break
+        attempted += 1
+        outcome = await apply_site_verification(guild, event)
+        if outcome in counts:
+            counts[outcome] += 1
+    bot._last_verify_sync = counts
+    return counts
+
+
+@tasks.loop(seconds=60)
+async def website_verification_loop():
+    await bot.wait_until_ready()
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    try:
+        report = await sync_website_verifications(guild)
+        if report["roles_updated"]:
+            logging.info(
+                "Website sync applied roles for %d verified Team lb members",
+                report["roles_updated"],
+            )
+    except VerificationSyncError as error:
+        bot._last_verify_sync_error = str(error)
+        logging.warning("Verification website sync: %s", error)
+    except Exception:
+        bot._last_verify_sync_error = "Unexpected website synchronization failure"
+        logging.exception("Verification website sync failed")
+
+
+@website_verification_loop.before_loop
+async def before_website_verification_loop():
+    await bot.wait_until_ready()
+
+
 @bot.tree.command(
     name="verifycheck",
     description="Owner-only diagnosis of Wispbyte verification roles and permissions",
@@ -1025,6 +1171,8 @@ async def on_ready():
                 logging.exception("Team lb slash command sync failed")
         if not maintenance.is_running():
             maintenance.start()
+        if not website_verification_loop.is_running():
+            website_verification_loop.start()
         guild = bot.get_guild(GUILD_ID)
         if guild is not None:
             bot._verification_setup_task = asyncio.create_task(
