@@ -224,7 +224,12 @@ class TicketView(discord.ui.View):
     @discord.ui.button(label="🔒 Close", style=discord.ButtonStyle.danger, custom_id="lb:case:close")
     async def close(self, interaction, button):
         row = case_for(interaction.channel_id)
-        if not row or (interaction.user.id != row["user_id"] and not is_owner(interaction.user) and not interaction.user.guild_permissions.manage_channels):
+        if not row:
+            return await interaction.response.send_message("Ticket not found.", ephemeral=True)
+        if row["status"] != "open":
+            return await interaction.response.send_message("Ticket already closed.", ephemeral=True)
+        if (interaction.user.id != row["user_id"] and not is_owner(interaction.user)
+                and not interaction.user.guild_permissions.manage_channels):
             return await interaction.response.send_message("Not allowed.", ephemeral=True)
         # Compare-and-set prevents a double click from producing two owner DMs.
         changed = db.execute(
@@ -264,7 +269,8 @@ class OwnerDecisionView(discord.ui.View):
     async def decide(self, interaction, decision):
         if not is_owner(interaction.user): return await interaction.response.send_message("Owner only.", ephemeral=True)
         row = case_for(self.channel_id)
-        if not row: return await interaction.response.send_message("Case not found.", ephemeral=True)
+        if not row or row["status"] != "open":
+            return await interaction.response.send_message("Ticket is already closed.", ephemeral=True)
         db.execute(
             "UPDATE applications SET decision=? WHERE channel_id=?",
             (decision, self.channel_id),
@@ -290,7 +296,20 @@ async def create_case(interaction, kind, summary):
     overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False),
                   interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
                   guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)}
-    if role: overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    if role:
+        overwrites[role] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True
+        )
+    owner_member = guild.get_member(OWNER_ID)
+    if not owner_member:
+        try:
+            owner_member = await guild.fetch_member(OWNER_ID)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            logging.warning("Owner not found in server; no owner-specific ticket overwrite")
+    if owner_member:
+        overwrites[owner_member] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True
+        )
     category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
     try:
         channel = await guild.create_text_channel(f"{kind}-{interaction.user.name}"[:95], category=category if isinstance(category, discord.CategoryChannel) else None, overwrites=overwrites, reason="Team lb case")
