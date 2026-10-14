@@ -5,6 +5,7 @@ A Python `discord.py` bot with private tickets, support AI, giveaways, middleman
 ## Features
 
 - `/giveaway item:<prize> time:<30m|2h|1d>`: button to enter, **only** if the entrant already has Member role `1559829257952174199`. Re-checks role when choosing the winner.
+- `/verify`: opens the official Discord OAuth verification panel with a purple **Verify Now** link button. Server managers post a public panel; other members receive a private button. Managers can also post the public embed using `!verify`.
 - `/ticket`: posts a support panel; members open private tickets through a modal. The bot mentions staff role `1559829258325594149`, gives quick Cloudflare AI answers when configured (no OpenAI key needed), accepts evidence attachments and DMs them to the owner. Members can request a human (which pauses AI) or close a case.
 - `/middleman`: opens a panel/modal for the other trader, what you give and what you receive. A human must oversee trades.
 - `/apply type:staff` and `/apply type:stash`: posts application panels with tailored questions and sends details to the owner. **Note:** Discord uses `/apply type:staff` rather than a standalone `/apply staff` command; choose the type from the menu.
@@ -51,6 +52,12 @@ For **Wispbyte**: choose Python 3.11+ and set `PY_FILE=main.py`, `REQUIREMENTS_F
 - View the **actual Neuron usage** in the Cloudflare Workers AI dashboard. Paid Cloudflare plans may charge for use beyond the free allocation; do not enable paid usage if you require zero cost.
 
 Docs: [Pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/) · [Rate limits](https://developers.cloudflare.com/workers-ai/platform/limits/) · [Create API token](https://developers.cloudflare.com/workers-ai/get-started/rest-api/).
+
+## The verification command
+
+Use `/verify` in the Team lb server to show a purple verification embed with the **Verify Now** button linking to `https://verify.lb000.xyz/?server=<your guild ID>`. Members see it privately; people with **Manage Server** permission can publish it to the channel. A manager can also use `!verify` to post the same panel publicly.
+
+Verification is handled by your existing Cloudflare Verify Portal, **not by this Python bot**, and it is separate from the Cloudflare AI token. The bot does not ask members to share a Discord password. The external website controls which role is assigned; make sure it assigns the Member role `1559829257952174199` if you want successful verification to unlock Team lb giveaways.
 
 ## Verification and remaining features
 
