@@ -616,7 +616,7 @@ async def ensure_verification_panel(channel):
 
 async def reconcile_verified_role(member, unverified=None):
     """Give Unverified to people without Verified; remove it once verified."""
-    if member.bot or member.guild.id != GUILD_ID or member.id == OWNER_ID:
+    if member.bot or member.guild.id != GUILD_ID:
         return False
     unverified = unverified or find_unverified_role(member.guild)
     if not unverified:
@@ -628,6 +628,10 @@ async def reconcile_verified_role(member, unverified=None):
                 unverified, reason="Member completed Discord verification"
             )
             return True
+        # Do not lock the owner out for testing, but still remove Unverified
+        # from the owner when the Verified role is successfully assigned.
+        if member.id == OWNER_ID:
+            return False
         if not verified(member) and not has_unverified:
             await member.add_roles(
                 unverified, reason="New Team lb member must verify"
