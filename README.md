@@ -11,7 +11,7 @@ Production Python bot for Team lb: verification panels, private AI-supported tic
 | `/ticket` | Server managers | Posts the private-ticket panel |
 | `/middleman` | Server managers | Posts the middleman request panel |
 | `/apply type:staff` or `type:stash` | Server managers | Posts the respective application panel |
-| `/giveaway item time` | Server managers | Starts a giveaway requiring verified Member role `1559829257952174199` |
+| `/giveaway item time` | Server managers | Starts a giveaway requiring verified Member role `1560003144036126853` |
 | `vouch @user` | Members | Gives another member **one vouch**; each giver can vouch only once every **30 minutes**, even after a restart; no self-vouching or bots |
 | `!vouchcount @user number` | Owner only | Sets a user's vouch count. Raw Discord user ID works instead of a mention |
 | `/vouch member count` | Owner only | Slash-command equivalent for manually correcting vouch counts |
@@ -66,17 +66,17 @@ Cloudflare's free Workers AI allocation is **10,000 Neurons per day per account*
 
 ## Automatic Verified and Unverified onboarding
 
-Team lb server ID: `1559829257952174192`. Your **existing Verified role** ID is `1559829257952174199`; the bot **reuses it and does not create another Verified role**.
+Team lb server ID: `1559829257952174192`. Your **existing Verified role** ID is `1560003144036126853`; the bot **reuses it and does not create another Verified role**.
 
 When the Wispbyte bot starts, it automatically:
 
-1. Finds or creates a separate role named **Unverified** with no global permissions.
+1. Finds the existing **Unverified** role by ID `1560003406687371355`; it does not create a duplicate role.
 2. Finds or creates the `#verify` text channel, hides it from `@everyone` and Verified, gives **Unverified** read-only access, and posts the purple **Verify Now** Discord OAuth button once.
 3. Makes all other current server channels hidden from the **Unverified** role, without changing any other role's permissions. Newly created channels are also hidden from Unverified.
 4. Adds Unverified to new people who are not yet Verified, and reconciles existing server members after bot startup.
 5. Removes Unverified when the existing Verified role is assigned; if Verified is removed later, it restores Unverified.
 
-The verification website `https://verify.lb000.xyz/?server=1559829257952174192` runs in the **separate** `beyhuml1-hue/discord-bot` repository. Its `website/verification.mjs` worker now assigns role `1559829257952174199` and **removes Unverified** after successful OAuth verification. The Python bot additionally cleans up any leftover Unverified role on a Discord member update. `/verify` displays a private link to unverified members; `!verify` and manager `/verify` point to the restricted verification channel rather than publishing the panel elsewhere.
+The verification website `https://verify.lb000.xyz/?server=1559829257952174192` runs in the **separate** `beyhuml1-hue/discord-bot` repository. Its `website/verification.mjs` worker now assigns **Verified** role `1560003144036126853` and then removes **Unverified** role `1560003406687371355` after successful OAuth verification. The Python bot additionally cleans up any leftover Unverified role on a Discord member update. `/verify` displays a private link to unverified members; `!verify` and manager `/verify` point to the restricted verification channel rather than publishing the panel elsewhere.
 
 **Required permissions:** Both the Wispbyte bot and the Cloudflare verification bot need **Manage Roles** and must sit **above both Verified and Unverified** in Server Settings → Roles. The Wispbyte bot also needs **Manage Channels**, **View Channels**, **Send Messages**, **Read Message History** and **Embed Links**. Enable **Server Members Intent** and **Message Content Intent**. Without Manage Roles/Channels, automatic setup will log an error instead of silently making an unrestricted verification panel. Discord administrators can still see private channels.
 
