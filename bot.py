@@ -802,6 +802,7 @@ async def sync_website_verifications(guild):
         if outcome in counts:
             counts[outcome] += 1
     bot._last_verify_sync = counts
+    bot._last_verify_sync_error = None
     return counts
 
 
@@ -846,6 +847,7 @@ async def verifycheck(interaction: discord.Interaction):
         return await interaction.response.send_message(
             "Use this in Team lb.", ephemeral=True
         )
+    await interaction.response.defer(ephemeral=True, thinking=True)
     me = guild.me or guild.get_member(bot.user.id)
     verified_role = guild.get_role(VERIFIED_ROLE_ID)
     unverified_role = guild.get_role(UNVERIFIED_ROLE_ID)
@@ -880,13 +882,26 @@ async def verifycheck(interaction: discord.Interaction):
             if role:
                 allowed = channel.overwrites_for(role).view_channel is expected
                 lines.append(f"{title}: {'✅' if allowed else '❌'}")
+    # Prove the website is reachable and actually apply any pending role changes.
+    try:
+        report = await sync_website_verifications(guild)
+        lines.append(
+            f"Website connection: ✅ Connected to verify.lb000.xyz"
+            f" — {report['website_records']} site records,"
+            f" {report['roles_updated']} member role updates this pass."
+        )
+    except VerificationSyncError as error:
+        lines.append(f"Website connection: ❌ {error}")
+    except Exception:
+        logging.exception("Owner verification connection check failed")
+        lines.append("Website connection: ❌ Check Wispbyte logs for sync failure.")
     lines.append(
-        "**Important:** Cloudflare uses a separate verification bot. "
-        "It must also have Manage Roles and its highest role above both roles; "
-        "this command cannot inspect that bot's secret or Cloudflare deployment."
+        "The website uses a separate Discord application. "
+        "Wispbyte can now grant roles from OAuth records even if that bot "
+        "cannot manage roles, once private website sync access is configured."
     )
-    await interaction.response.send_message(
-        "\n".join(lines), ephemeral=True,
+    await interaction.followup.send(
+        "\n".join(lines)[:1950], ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
