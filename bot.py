@@ -22,8 +22,8 @@ if not TOKEN or TOKEN.startswith("replace_"):
     raise SystemExit("Set your NEW Discord bot token as DISCORD_TOKEN in private host variables. Never commit or share it.")
 GUILD_ID = int(os.getenv("GUILD_ID", "1559829257952174192"))
 OWNER_ID = int(os.getenv("OWNER_ID", "1500253920918900883"))
-MEMBER_ROLE_ID = 1559829257952174199  # Existing Verified role — never create another
-UNVERIFIED_ROLE_NAME = "Unverified"
+VERIFIED_ROLE_ID = 1560003144036126853
+UNVERIFIED_ROLE_ID = 1560003406687371355
 VERIFY_CHANNEL_NAME = "verify"
 STAFF_ROLE_ID = 1559829258325594149
 VOUCH_COOLDOWN_SECONDS = 30 * 60
@@ -67,7 +67,7 @@ def panel(title, description):
     return discord.Embed(title=title, description=description, color=COLOR).set_footer(text="Donut SMP | Team lb")
 
 def is_owner(user): return user.id == OWNER_ID
-def verified(member): return isinstance(member, discord.Member) and any(r.id == MEMBER_ROLE_ID for r in member.roles)
+def verified(member): return isinstance(member, discord.Member) and any(r.id == VERIFIED_ROLE_ID for r in member.roles)
 def staff_role(guild): return guild.get_role(STAFF_ROLE_ID)
 def case_for(channel_id):
     return db.execute("SELECT * FROM cases WHERE channel_id=?", (channel_id,)).fetchone()
@@ -203,7 +203,7 @@ class GiveawayView(discord.ui.View):
     @discord.ui.button(label="🎉 Enter giveaway", style=discord.ButtonStyle.success, custom_id="lb:giveaway:enter")
     async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not verified(interaction.user):
-            return await interaction.response.send_message("You need the existing verified Member role to enter.", ephemeral=True)
+            return await interaction.response.send_message("You need the Verified role to enter.", ephemeral=True)
         row = db.execute("SELECT * FROM giveaways WHERE message_id=?", (interaction.message.id,)).fetchone()
         if not row or row["finished"] or row["ends"] <= now():
             return await interaction.response.send_message("This giveaway has ended.", ephemeral=True)
@@ -398,7 +398,7 @@ async def giveaway(interaction:discord.Interaction,item:str,time:str):
     if not 60 <= seconds <= 30*86400: return await interaction.response.send_message("Duration must be 1 minute to 30 days.",ephemeral=True)
     ends = now()+seconds
     await interaction.response.send_message("Giveaway created.",ephemeral=True)
-    msg = await interaction.channel.send(embed=panel("🎉 Team lb Giveaway",f"**Prize:** {discord.utils.escape_mentions(item[:300])}\n**Ends:** <t:{ends}:R>\nYou must have the existing Member role to enter."),view=GiveawayView())
+    msg = await interaction.channel.send(embed=panel("🎉 Team lb Giveaway",f"**Prize:** {discord.utils.escape_mentions(item[:300])}\n**Ends:** <t:{ends}:R>\nYou must have the Verified role to enter."),view=GiveawayView())
     db.execute("INSERT INTO giveaways VALUES (?,?,?,?,0)",(msg.id,msg.channel.id,item[:300],ends))
     db.commit()
 
@@ -441,11 +441,9 @@ def verification_panel(guild_id):
 
 
 def find_unverified_role(guild):
-    return next(
-        (role for role in guild.roles
-         if not role.managed and role.name.casefold() == UNVERIFIED_ROLE_NAME.casefold()),
-        None,
-    )
+    """Always use Team lb's existing Unverified role by ID, not its name."""
+    role = guild.get_role(UNVERIFIED_ROLE_ID)
+    return role if role is not None and not role.managed else None
 
 
 def find_verification_channel(guild):
@@ -458,33 +456,15 @@ def find_verification_channel(guild):
 
 
 async def ensure_unverified_role(guild):
-    """Create only Unverified. The existing Verified role ID must never be recreated."""
+    """Use the existing Unverified role, never create a duplicate."""
     role = find_unverified_role(guild)
-    if role:
-        return role
-    async with verification_role_lock:
-        role = find_unverified_role(guild)
-        if role:
-            return role
-        try:
-            role = await guild.create_role(
-                name=UNVERIFIED_ROLE_NAME,
-                permissions=discord.Permissions.none(),
-                hoist=False,
-                mentionable=False,
-                reason="Team lb onboarding: members verify before seeing the server",
-            )
-            logging.info("Created Unverified role %s in Team lb", role.id)
-            return role
-        except discord.Forbidden:
-            logging.error(
-                "Cannot create Unverified role. Give the Wispbyte bot Manage Roles "
-                "and put its bot role above Unverified in Server Settings > Roles."
-            )
-        except discord.HTTPException:
-            logging.exception("Discord could not create Unverified role")
-    return None
-
+    if role is None:
+        logging.error(
+            "Unverified role %s is missing from Team lb; restore it or "
+            "update UNVERIFIED_ROLE_ID before starting verification.",
+            UNVERIFIED_ROLE_ID,
+        )
+    return role
 
 async def set_verify_visibility(channel, target, allowed, read_only=False, bot_access=False):
     """Change only the relevant role overwrite, preserving unrelated permissions."""
@@ -520,12 +500,12 @@ async def set_verify_visibility(channel, target, allowed, read_only=False, bot_a
 
 
 async def ensure_verification_channel(guild, unverified):
-    verified_role = guild.get_role(MEMBER_ROLE_ID)
+    verified_role = guild.get_role(VERIFIED_ROLE_ID)
     if verified_role is None:
         logging.error(
             "Team lb Verified role %s does not exist. "
             "Create/fix the original role before setting up verification.",
-            MEMBER_ROLE_ID,
+            VERIFIED_ROLE_ID,
         )
         return None
     channel = find_verification_channel(guild)
