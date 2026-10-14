@@ -12,7 +12,8 @@ os.environ.setdefault("DB_PATH", ":memory:")
 import bot as team
 
 
-VERIFIED_ID = 1559829257952174199
+VERIFIED_ID = 1560003144036126853
+UNVERIFIED_ID = 1560003406687371355
 GUILD_ID = 1559829257952174192
 
 
@@ -37,14 +38,18 @@ class FakeChannel:
 
 def fake_guild(verify=None):
     verified = role(VERIFIED_ID, "Verified")
-    unverified = role(333333333333333333, "Unverified")
+    unverified = role(UNVERIFIED_ID, "Unverified")
     everyone = role(GUILD_ID, "@everyone")
     bot_member = role(444444444444444444, "bot")
     guild = SimpleNamespace(
         id=GUILD_ID, roles=[verified, unverified],
         default_role=everyone, me=bot_member,
         channels=[], text_channels=[], chunked=True, members=[],
-        get_role=lambda identifier: verified if identifier == VERIFIED_ID else None,
+        get_role=lambda identifier: (
+            verified if identifier == VERIFIED_ID
+            else unverified if identifier == UNVERIFIED_ID
+            else None
+        ),
         create_text_channel=AsyncMock(),
     )
     if verify:
@@ -55,21 +60,26 @@ def fake_guild(verify=None):
 
 
 class VerificationRoleTests(unittest.IsolatedAsyncioTestCase):
-    async def test_create_unverified_without_recreating_verified(self):
+    async def test_exact_ids_are_used_for_both_roles(self):
         guild, verified, unverified, *_ = fake_guild()
-        guild.roles = [verified]
-        guild.create_role = AsyncMock(return_value=unverified)
-        made = await team.ensure_unverified_role(guild)
-        self.assertEqual(made.name, "Unverified")
-        guild.create_role.assert_awaited_once()
-        self.assertEqual(guild.create_role.await_args.kwargs["name"], "Unverified")
-        self.assertEqual(team.MEMBER_ROLE_ID, VERIFIED_ID)
-
-    async def test_existing_unverified_is_reused(self):
-        guild, _, unverified, *_ = fake_guild()
         guild.create_role = AsyncMock()
         self.assertIs(await team.ensure_unverified_role(guild), unverified)
+        self.assertEqual(team.VERIFIED_ROLE_ID, VERIFIED_ID)
+        self.assertEqual(team.UNVERIFIED_ROLE_ID, UNVERIFIED_ID)
         guild.create_role.assert_not_awaited()
+
+    async def test_missing_unverified_does_not_create_duplicate_role(self):
+        guild, verified, unverified, *_ = fake_guild()
+        guild.roles = [verified]
+        guild.get_role = lambda identifier: verified if identifier == VERIFIED_ID else None
+        guild.create_role = AsyncMock()
+        self.assertIsNone(await team.ensure_unverified_role(guild))
+        guild.create_role.assert_not_awaited()
+
+    async def test_wrong_role_name_does_not_matter_when_id_matches(self):
+        guild, verified, unverified, *_ = fake_guild()
+        unverified.name = "Waiting for Verification"
+        self.assertIs(await team.ensure_unverified_role(guild), unverified)
 
     async def test_existing_verify_channel_is_unverified_only(self):
         channel = FakeChannel(222222222222222222, "verify")
