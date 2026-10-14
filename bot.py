@@ -274,7 +274,7 @@ async def on_message(message):
         # Store every applicant answer even if the AI reply is rate-limited.
         if row["kind"] in ("staff", "stash"):
             db.execute("UPDATE applications SET answers=substr(answers || ?,1,12000) WHERE channel_id=?",
-                       ("\\n" + message.content[:1000], message.channel.id))
+                       ("\n" + message.content[:1000], message.channel.id))
             db.commit()
         # One inference per ticket every 12 seconds protects the shared free quota.
         last_reply = ai_last_response.get(message.channel.id, 0)
