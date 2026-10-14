@@ -6,6 +6,7 @@ import random
 import sqlite3
 import asyncio
 import logging
+import io
 from datetime import datetime, timezone
 
 import discord
@@ -39,6 +40,15 @@ CREATE TABLE IF NOT EXISTS applications (channel_id INTEGER PRIMARY KEY, answers
 CREATE TABLE IF NOT EXISTS vouches (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS audit (at INTEGER, actor INTEGER, action TEXT, detail TEXT);
 """)
+# Upgrade existing Wispbyte databases in place without deleting open tickets.
+case_columns = {column[1] for column in db.execute("PRAGMA table_info(cases)")}
+for name, declaration in {
+    "closed_at": "INTEGER DEFAULT 0",
+    "closed_by": "INTEGER DEFAULT 0",
+    "owner_notified": "INTEGER DEFAULT 0",
+}.items():
+    if name not in case_columns:
+        db.execute(f"ALTER TABLE cases ADD COLUMN {name} {declaration}")
 db.commit()
 
 def now(): return int(time.time())
@@ -55,10 +65,66 @@ def staff_role(guild): return guild.get_role(STAFF_ROLE_ID)
 def case_for(channel_id):
     return db.execute("SELECT * FROM cases WHERE channel_id=?", (channel_id,)).fetchone()
 
-async def notify_owner(message, view=None):
-    user = await bot.fetch_user(OWNER_ID)
-    try: await user.send(content=message[:1900], view=view)
-    except discord.Forbidden: logging.warning("Cannot DM owner; enable DMs.")
+async def send_completion_report(channel, case, closed_by):
+    """Send the owner exactly one DM with a finished-case summary and transcript."""
+    if case["owner_notified"]:
+        return
+    try:
+        transcript_messages = []
+        async for item in channel.history(limit=200, oldest_first=False):
+            transcript_messages.append(item)
+        transcript_messages.reverse()
+        rows = []
+        for item in transcript_messages:
+            timestamp = item.created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            body = item.clean_content or "[no text]"
+            attachments = " ".join(attachment.url for attachment in item.attachments)
+            if attachments:
+                body += "\\nAttachments: " + attachments
+            rows.append(f"[{timestamp}] {item.author} ({item.author.id}): {body[:3500]}")
+        transcript = (
+            f"Donut SMP | Team lb — {case['kind']} ticket\\n"
+            f"Channel: {channel.id}\\n"
+            f"Opened by: {case['user_id']}\\n"
+            f"Closed by: {closed_by.id}\\n"
+            f"Original request: {case['summary']}\\n\\n"
+            + "\\n\\n".join(rows)
+        )[-170000:]
+        decision_row = db.execute(
+            "SELECT decision FROM applications WHERE channel_id=?", (channel.id,)
+        ).fetchone()
+        decision = decision_row["decision"] if decision_row and decision_row["decision"] else "No owner decision recorded"
+        opening = discord.utils.escape_mentions(case["summary"][:280])
+        status = "Human requested" if case["human_requested"] else "Handled in ticket"
+        message = (
+            f"✅ **{case['kind'].title()} concluded**\\n"
+            f"Member: <@{case['user_id']}>\\n"
+            f"Channel: {channel.mention}\\n"
+            f"Closed by: {discord.utils.escape_markdown(str(closed_by))}\\n"
+            f"Outcome: {discord.utils.escape_markdown(decision)}\\n"
+            f"Support: {status}\\n"
+            f"Original request: {opening}\\n\\n"
+            "**Full ticket transcript attached.**"
+        )
+        owner = await bot.fetch_user(OWNER_ID)
+        await owner.send(
+            content=message[:1900],
+            file=discord.File(
+                io.BytesIO(transcript.encode("utf-8")),
+                filename=f"team-lb-{case['kind']}-{channel.id}.txt",
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        db.execute(
+            "UPDATE cases SET owner_notified=1 WHERE channel_id=? AND owner_notified=0",
+            (channel.id,),
+        )
+        db.commit()
+    except (discord.HTTPException, discord.Forbidden):
+        logging.exception("Final ticket report could not be DMed to the owner")
+    except Exception:
+        logging.exception("Failed to create the final ticket report")
+
 
 async def ai_reply(question, context=""):
     return await generate_reply(question, context)
