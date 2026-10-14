@@ -13,7 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from cloudflare_ai import generate_reply, start_ai_client, close_ai_client
+from cloudflare_ai import generate_reply, start_ai_client, close_ai_client, ai_configured
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -465,6 +465,28 @@ async def middleman(interaction:discord.Interaction): await send_panel(interacti
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def apply(interaction:discord.Interaction,type:app_commands.Choice[str]): await send_panel(interaction,type.value)
 
+@bot.tree.command(name="aitest", description="Check your Cloudflare support AI connection")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def aitest(interaction: discord.Interaction):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("Owner only.", ephemeral=True)
+    if not ai_configured():
+        return await interaction.response.send_message(
+            "Cloudflare AI is waiting for a private CLOUDFLARE_API_TOKEN in "
+            "Wispbyte Startup variables or .env. The Account ID is configured. "
+            "Restart the bot after adding your token.",
+            ephemeral=True,
+        )
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    answer = await generate_reply(
+        "Say hello and confirm in one sentence that Discord ticket AI is available."
+    )
+    await interaction.followup.send(
+        "Cloudflare AI replied:\n" + discord.utils.escape_mentions(answer)[:1700],
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="vouch",description="Set an applicant's manually reviewed vouch count")
 @app_commands.describe(member="Member to update",count="Reviewed vouches")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -647,10 +669,38 @@ async def on_ready():
         # Owner decision buttons need registration per case after every restart.
         for row in db.execute("SELECT channel_id,kind FROM cases WHERE status='open'").fetchall():
             bot.add_view(OwnerDecisionView(row["channel_id"],row["kind"]))
-        await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        maintenance.start()
+        if bot.get_guild(GUILD_ID) is None:
+            logging.error(
+                "The bot is not in guild %s. Invite the same application token "
+                "with bot and applications.commands scopes.",
+                GUILD_ID,
+            )
+        else:
+            try:
+                synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+                logging.info("Synced %d slash commands in Team lb", len(synced))
+            except discord.Forbidden:
+                logging.error("Cannot register slash commands in guild %s: Missing Access", GUILD_ID)
+            except discord.HTTPException:
+                logging.exception("Team lb slash command sync failed")
+        if not maintenance.is_running():
+            maintenance.start()
         bot._initialized=True
     logging.info("Connected as %s",bot.user)
+    logging.info(
+        "Cloudflare ticket AI: %s",
+        "configured" if ai_configured() else "token missing; ticket fallback only",
+    )
+
+
+@bot.event
+async def on_guild_join(guild):
+    if guild.id == GUILD_ID:
+        try:
+            synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+            logging.info("Synced %d commands after joining Team lb", len(synced))
+        except discord.HTTPException:
+            logging.exception("Could not sync slash commands after joining Team lb")
 
 def main():
     bot.run(TOKEN)
