@@ -244,6 +244,48 @@ async def send_panel(interaction,kind):
     await interaction.channel.send(embed=panel(f"🍩 {kind.title()} | Team lb",descriptions[kind]),view=PanelView(kind))
     await interaction.response.send_message("Panel posted.",ephemeral=True)
 
+def verification_panel(guild_id):
+    """Use the existing Discord OAuth verification site; never collect credentials."""
+    url = f"https://verify.lb000.xyz/?server={int(guild_id)}"
+    embed = discord.Embed(
+        title="✅ Verify your Discord account",
+        description=(
+            "Welcome to **Donut SMP | Team lb**!\n\n"
+            "Click **Verify Now** below to open our Discord verification website.\n"
+            "1. Sign in through Discord.\n"
+            "2. Review the server and permissions requested.\n"
+            "3. Authorize only what you are comfortable with.\n\n"
+            "Never share your Discord password or bot token."
+        ),
+        color=discord.Color.from_rgb(149, 119, 251),
+    )
+    embed.set_footer(text="Official verification • verify.lb000.xyz")
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label="✅ Verify Now",
+        style=discord.ButtonStyle.link,
+        url=url,
+    ))
+    return embed, view
+
+
+@bot.tree.command(name="verify", description="Open the official Discord verification panel")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def verify_command(interaction: discord.Interaction):
+    if not interaction.guild_id:
+        return await interaction.response.send_message(
+            "Use this command in your Team lb server.", ephemeral=True
+        )
+    embed, view = verification_panel(interaction.guild_id)
+    # Managers post a panel for the whole channel. Everyone else gets a private
+    # verification button, keeping public channels clear of repeated panels.
+    if interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message("Verification panel posted.", ephemeral=True)
+        await interaction.channel.send(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
 @bot.tree.command(name="ticket",description="Create the support ticket panel")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def ticket(interaction:discord.Interaction): await send_panel(interaction,"ticket")
@@ -276,6 +318,17 @@ async def on_message(message):
             active = db.execute("SELECT COUNT(*) n FROM cases WHERE status='open'").fetchone()["n"]
             return await message.channel.send(f"Team lb online. {active} open cases. Use server slash commands to post panels.")
         return await message.channel.send("Owner DM received. For safety I don't execute unrestricted natural-language commands. Use Discord moderation tools and the owner decision buttons.")
+    if message.guild and message.content.strip().lower() == "!verify":
+        if message.author.guild_permissions.manage_guild:
+            embed, view = verification_panel(message.guild.id)
+            await message.channel.send(embed=embed, view=view)
+        else:
+            await message.reply(
+                "Use **/verify** to get your personal verification link.",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        return
     row = case_for(message.channel.id)
     if not row or row["status"] != "open": return
     if message.author.id == OWNER_ID or (isinstance(message.author,discord.Member) and any(r.id == STAFF_ROLE_ID for r in message.author.roles)): return
