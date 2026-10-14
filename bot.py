@@ -80,15 +80,15 @@ async def send_completion_report(channel, case, closed_by):
             body = item.clean_content or "[no text]"
             attachments = " ".join(attachment.url for attachment in item.attachments)
             if attachments:
-                body += "\\nAttachments: " + attachments
+                body += "\nAttachments: " + attachments
             rows.append(f"[{timestamp}] {item.author} ({item.author.id}): {body[:3500]}")
         transcript = (
-            f"Donut SMP | Team lb — {case['kind']} ticket\\n"
-            f"Channel: {channel.id}\\n"
-            f"Opened by: {case['user_id']}\\n"
-            f"Closed by: {closed_by.id}\\n"
-            f"Original request: {case['summary']}\\n\\n"
-            + "\\n\\n".join(rows)
+            f"Donut SMP | Team lb — {case['kind']} ticket\n"
+            f"Channel: {channel.id}\n"
+            f"Opened by: {case['user_id']}\n"
+            f"Closed by: {closed_by.id}\n"
+            f"Original request: {case['summary']}\n\n"
+            + "\n\n".join(rows)
         )[-170000:]
         decision_row = db.execute(
             "SELECT decision FROM applications WHERE channel_id=?", (channel.id,)
@@ -97,13 +97,13 @@ async def send_completion_report(channel, case, closed_by):
         opening = discord.utils.escape_mentions(case["summary"][:280])
         status = "Human requested" if case["human_requested"] else "Handled in ticket"
         message = (
-            f"✅ **{case['kind'].title()} concluded**\\n"
-            f"Member: <@{case['user_id']}>\\n"
-            f"Channel: {channel.mention}\\n"
-            f"Closed by: {discord.utils.escape_markdown(str(closed_by))}\\n"
-            f"Outcome: {discord.utils.escape_markdown(decision)}\\n"
-            f"Support: {status}\\n"
-            f"Original request: {opening}\\n\\n"
+            f"✅ **{case['kind'].title()} concluded**\n"
+            f"Member: <@{case['user_id']}>\n"
+            f"Channel: {channel.mention}\n"
+            f"Closed by: {discord.utils.escape_markdown(str(closed_by))}\n"
+            f"Outcome: {discord.utils.escape_markdown(decision)}\n"
+            f"Support: {status}\n"
+            f"Original request: {opening}\n\n"
             "**Full ticket transcript attached.**"
         )
         owner = await bot.fetch_user(OWNER_ID)
@@ -206,25 +206,50 @@ class TicketView(discord.ui.View):
         if not row or row["status"] != "open": return await interaction.response.send_message("Ticket is closed.", ephemeral=True)
         if interaction.user.id != row["user_id"] and not is_owner(interaction.user):
             return await interaction.response.send_message("Not your ticket.", ephemeral=True)
+        if row["human_requested"]:
+            return await interaction.response.send_message(
+                "Staff have already been requested for this ticket.", ephemeral=True
+            )
         db.execute("UPDATE cases SET human_requested=1 WHERE channel_id=?", (interaction.channel_id,))
         db.commit()
-        await interaction.response.send_message("A human has been requested.")
-        await notify_owner(f"🙋 Human requested in <#{interaction.channel_id}> by <@{row['user_id']}>.")
+        await interaction.response.send_message(
+            "A human has been requested. AI replies are paused in this ticket."
+        )
         role = staff_role(interaction.guild)
-        if role: await interaction.channel.send(f"{role.mention} Human assistance requested.", allowed_mentions=discord.AllowedMentions(roles=True))
+        if role:
+            await interaction.channel.send(
+                f"{role.mention} Human assistance requested.",
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
     @discord.ui.button(label="🔒 Close", style=discord.ButtonStyle.danger, custom_id="lb:case:close")
     async def close(self, interaction, button):
         row = case_for(interaction.channel_id)
         if not row or (interaction.user.id != row["user_id"] and not is_owner(interaction.user) and not interaction.user.guild_permissions.manage_channels):
             return await interaction.response.send_message("Not allowed.", ephemeral=True)
-        db.execute("UPDATE cases SET status='closed' WHERE channel_id=?", (interaction.channel_id,))
+        # Compare-and-set prevents a double click from producing two owner DMs.
+        changed = db.execute(
+            "UPDATE cases SET status='closed', closed_at=?, closed_by=? "
+            "WHERE channel_id=? AND status='open'",
+            (now(), interaction.user.id, interaction.channel_id),
+        )
         db.commit()
+        if not changed.rowcount:
+            return await interaction.response.send_message(
+                "This ticket is already closed.", ephemeral=True
+            )
         log_action(interaction.user.id, "close", str(interaction.channel_id))
-        await interaction.response.send_message("Closed. This channel is now read-only.")
-        overwrite = interaction.channel.overwrites_for(interaction.guild.get_member(row["user_id"]))
-        overwrite.send_messages = False
+        await interaction.response.send_message(
+            "Ticket concluded. The owner receives one final report with the transcript."
+        )
         member = interaction.guild.get_member(row["user_id"])
-        if member: await interaction.channel.set_permissions(member, overwrite=overwrite)
+        if member:
+            overwrite = interaction.channel.overwrites_for(member)
+            overwrite.send_messages = False
+            try:
+                await interaction.channel.set_permissions(member, overwrite=overwrite)
+            except discord.Forbidden:
+                logging.warning("Could not make concluded ticket read-only")
+        await send_completion_report(interaction.channel, row, interaction.user)
 
 class OwnerDecisionView(discord.ui.View):
     def __init__(self, channel_id, kind):
@@ -240,8 +265,10 @@ class OwnerDecisionView(discord.ui.View):
         if not is_owner(interaction.user): return await interaction.response.send_message("Owner only.", ephemeral=True)
         row = case_for(self.channel_id)
         if not row: return await interaction.response.send_message("Case not found.", ephemeral=True)
-        db.execute("INSERT OR REPLACE INTO applications(channel_id,answers,recommendation,decision) VALUES (?,?,COALESCE((SELECT recommendation FROM applications WHERE channel_id=?),''),?)",
-                   (self.channel_id,row["summary"],self.channel_id,decision))
+        db.execute(
+            "UPDATE applications SET decision=? WHERE channel_id=?",
+            (decision, self.channel_id),
+        )
         db.commit()
         log_action(interaction.user.id, "owner_decision", f"{self.channel_id}: {decision}")
         await interaction.response.send_message(f"Recorded: {decision}.")
@@ -278,7 +305,13 @@ async def create_case(interaction, kind, summary):
     await channel.send(content=f"{interaction.user.mention} <@&{STAFF_ROLE_ID}>" if role else interaction.user.mention,
                        embed=panel(f"{kind.title()} • {interaction.user.display_name}", f"{desc}\n\n**Submitted:**\n{discord.utils.escape_mentions(summary)[:1300]}"),
                        view=TicketView(), allowed_mentions=discord.AllowedMentions(users=True, roles=bool(role)))
-    await notify_owner(f"📩 New {kind} from {interaction.user} ({interaction.user.id})\nChannel: <#{channel.id}>\n{summary[:1000]}", OwnerDecisionView(channel.id,kind))
+    # Keep owner review controls in the ticket. The owner receives no DM
+    # until someone closes the ticket and its final transcript is ready.
+    await channel.send(
+        "🔐 **Owner review controls** (only the owner can use these buttons):",
+        view=OwnerDecisionView(channel.id,kind),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
     await interaction.followup.send(f"Created {channel.mention}", ephemeral=True)
     log_action(interaction.user.id, "open_case", f"{kind}:{channel.id}")
 
@@ -403,7 +436,7 @@ async def on_message(message):
     if evidence:
         db.execute("UPDATE cases SET evidence=substr(evidence || ?,1,8000) WHERE channel_id=?", ("\n"+evidence,message.channel.id))
         db.commit()
-        await notify_owner(f"📎 Evidence submitted in <#{message.channel.id}> by <@{message.author.id}>: {evidence[:1300]}")
+        # Evidence is included in the final transcript; do not DM the owner yet.
     if message.content:
         # Store every applicant answer even if the AI reply is rate-limited.
         if row["kind"] in ("staff", "stash"):
@@ -449,18 +482,6 @@ async def maintenance():
                 msg=await channel.fetch_message(row["message_id"])
                 await msg.edit(view=None)
             except discord.HTTPException: logging.exception("Could not finish giveaway UI")
-    for row in db.execute("SELECT * FROM cases WHERE status='open' AND owner_notice=0").fetchall():
-        delay = 86400 if row["kind"]=="staff" else 1800 if row["kind"]=="ticket" else None
-        if delay and now()-row["created"]>=delay:
-            # A delayed AI recommendation is never a verdict based on unverified allegations.
-            if row["kind"]=="staff":
-                rec="24h elapsed without a decision. The application remains pending for the owner; no role has been granted automatically."
-            else:
-                rec="30m elapsed without a decision. AI support remains active; no punishment will be issued based solely on an unverified report."
-            db.execute("UPDATE cases SET owner_notice=1 WHERE channel_id=?",(row["channel_id"],));db.commit()
-            await notify_owner(f"⏰ {row['kind'].title()} follow-up: <#{row['channel_id']}>\n{rec}")
-            channel=bot.get_channel(row["channel_id"])
-            if channel: await channel.send(rec)
 
 @maintenance.before_loop
 async def before_maintenance(): await bot.wait_until_ready()
