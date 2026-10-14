@@ -497,7 +497,7 @@ async def on_message(message):
         return
     if not message.guild:
         return
-    say = re.fullmatch(r"!say(?:\\s+([\\s\\S]*))?", message.content, flags=re.IGNORECASE)
+    say = re.fullmatch(r"!say(?:\s+([\s\S]*))?", message.content, flags=re.IGNORECASE)
     if say:
         if not (is_owner(message.author) or message.author.guild_permissions.manage_guild):
             return await message.reply(
@@ -522,7 +522,7 @@ async def on_message(message):
         )
         return
     edit_count = re.fullmatch(
-        r"!vouchcount\\s+(?:<@!?([0-9]{17,22})>|([0-9]{17,22}))\\s+(\\d{1,6})\\s*",
+        r"!vouchcount\s+(?:<@!?([0-9]{17,22})>|([0-9]{17,22}))\s+(\d{1,6})\s*",
         message.content, flags=re.IGNORECASE
     )
     if message.content.strip().lower().startswith("!vouchcount"):
@@ -545,7 +545,7 @@ async def on_message(message):
             allowed_mentions=discord.AllowedMentions.none(),
         )
     vouch = re.fullmatch(
-        r"vouch\\s+<@!?([0-9]{17,22})>\\s*", message.content,
+        r"vouch\s+<@!?([0-9]{17,22})>\s*", message.content,
         flags=re.IGNORECASE,
     )
     if vouch:
