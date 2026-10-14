@@ -6,7 +6,7 @@ Production Python bot for Team lb: verification panels, private AI-supported tic
 
 | Command | Who can use it | What it does |
 | --- | --- | --- |
-| `/verify` | Everyone | Gives unverified members a private link; managers are directed to the restricted #verify channel |
+| `/verify` | Everyone | Gives unverified members a private link; managers are directed to the restricted #verify channel |\n| `/verifycheck` | Owner only | Tests the live website connection, syncs newly verified roles and reports permissions |
 | `!verify` | Server managers | Confirms that the verification panel is in the restricted #verify channel |
 | `/ticket` | Server managers | Posts the private-ticket panel |
 | `/middleman` | Server managers | Posts the middleman request panel |
@@ -50,7 +50,7 @@ Wispbyte private environment settings:
 | `OWNER_ID` | Owner `1500253920918900883` (default is already in code) |
 | `CLOUDFLARE_ACCOUNT_ID` | Account ID is already configured in code |
 | `CLOUDFLARE_API_TOKEN` | Your private **Workers AI API token**, required for AI replies |
-| `CLOUDFLARE_AI_MODEL` | Optional, defaults to `@cf/meta/llama-3.2-1b-instruct` |
+| `CLOUDFLARE_AI_MODEL` | Optional, defaults to `@cf/meta/llama-3.2-1b-instruct` |\n| `VERIFY_SYNC_KEY` | Private shared website sync key if the Cloudflare verification bot uses a different Discord token; see setup below |
 | `TICKET_CATEGORY_ID` | Optional, `0` means create ticket channels at server root |
 | `DB_PATH` | Optional, default `bot.sqlite3` |
 
@@ -64,6 +64,23 @@ By default the bot uses the lightweight `@cf/meta/llama-3.2-1b-instruct` model a
 
 Cloudflare's free Workers AI allocation is **10,000 Neurons per day per account**, not a guaranteed count of messages. At an illustrative 500 input + 140 output tokens, the 1B model consumes approximately **3.78 Neurons per reply**, enough for roughly **2,600 messages per day** if the account has no other AI usage. More complex messages, concurrency limits and the verification Worker can lower that substantially. The 800-message goal is an estimate and **not guaranteed**. See [Cloudflare Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/).
 
+## Direct website ↔ Wispbyte verification connection
+
+The Python bot now connects to the website's private `https://verify.lb000.xyz/api/bot/verified` endpoint using HTTPS **every 60 seconds** and whenever the owner runs `/verifycheck`. This endpoint reads real Discord OAuth verification records — not a public webpage or an untrusted Discord message.
+
+After OAuth succeeds, the Cloudflare Worker tries to grant **Verified** (`1560003144036126853`) and remove **Unverified** (`1560003406687371355`) immediately. If its Discord bot lacks role permissions, the verified account is retained in the website registry, and **the Wispbyte bot independently completes that role update from the secured website feed**. The website shows a processing message and checks the live member roles until Discord confirms completion, rather than falsely claiming success.
+
+**Connect the two services securely:**
+
+1. **If Wispbyte `DISCORD_TOKEN` and Cloudflare `DISCORD_BOT_TOKEN` are the same Discord bot token:** No extra secret is needed. The existing website bot-token authorization is supported.
+2. **If they are different Discord bots:** Create **one random private string of at least 32 characters** and store the exact same value as `VERIFY_SYNC_KEY` in **Cloudflare Dashboard → Workers & Pages → verify-portal → Settings → Variables and Secrets** (Secret) and in **Wispbyte → Startup** (private environment variable), or the bot's private `.env`. Do not add the key to GitHub or post it in chat.
+3. **Redeploy Cloudflare `verify-portal` from this website repository** (`beyhuml1-hue/discord-bot`). **Update Wispbyte's `bot.py` and new `verify_sync.py`, then restart**. Keep your existing `bot.sqlite3`.
+4. Run `/verifycheck` in Team lb as the owner. The reply must say **Website connection: ✅ Connected**. A 403 error means the tokens are different and the shared key is missing or mismatched. A 404 or malformed response means the website hasn't been redeployed.
+
+**Security:** Only verified OAuth records for Team lb's exact guild ID are processed; the bot never reads public verification claims. A per-user timestamp is saved in SQLite after successful processing, so if staff manually revoke Verified later it is **not silently restored every minute**. A member can reverify deliberately to issue a fresh record. Website outages do **not** strip roles. The bot never needs anyone's Discord password, OAuth access token, or the Cloudflare `SESSION_SECRET`.
+
+The verification website's bot must still be installed in the server for its OAuth guild join flow; the Wispbyte bot needs **Manage Roles** and a bot role above Verified and Unverified to apply the roles. GitHub tests alone cannot connect the live services or deploy Cloudflare and Wispbyte.
+
 ## Automatic Verified and Unverified onboarding
 
 Team lb server ID: `1559829257952174192`. Your **existing Verified role** ID is `1560003144036126853`; the bot **reuses it and does not create another Verified role**.
@@ -76,7 +93,7 @@ When the Wispbyte bot starts, it automatically:
 4. Adds Unverified to new people who are not yet Verified, and reconciles existing server members after bot startup.
 5. Removes Unverified when the existing Verified role is assigned; if Verified is removed later, it restores Unverified.
 
-The verification website `https://verify.lb000.xyz/?server=1559829257952174192` runs in the **separate** `beyhuml1-hue/discord-bot` repository. Its `website/verification.mjs` worker now assigns **Verified** role `1560003144036126853` and then removes **Unverified** role `1560003406687371355` after successful OAuth verification. The Python bot additionally cleans up any leftover Unverified role on a Discord member update. `/verify` displays a private link to unverified members; `!verify` and manager `/verify` point to the restricted verification channel rather than publishing the panel elsewhere.
+The verification website `https://verify.lb000.xyz/?server=1559829257952174192` runs in the **separate** `beyhuml1-hue/discord-bot` repository. Its `website/verification.mjs` worker now assigns **Verified** role `1560003144036126853` and then removes **Unverified** role `1560003406687371355` after successful OAuth verification. The Python bot additionally cleans up any leftover Unverified role on a Discord member update and reads the website's private OAuth registry every minute. `/verify` displays a private link to unverified members; `!verify` and manager `/verify` point to the restricted verification channel rather than publishing the panel elsewhere.
 
 **Required permissions:** Both the Wispbyte bot and the Cloudflare verification bot need **Manage Roles** and must sit **above both Verified and Unverified** in Server Settings → Roles. The Wispbyte bot also needs **Manage Channels**, **View Channels**, **Send Messages**, **Read Message History** and **Embed Links**. Enable **Server Members Intent** and **Message Content Intent**. Without Manage Roles/Channels, automatic setup will log an error instead of silently making an unrestricted verification panel. Discord administrators can still see private channels.
 
