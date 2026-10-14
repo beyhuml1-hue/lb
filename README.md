@@ -6,12 +6,13 @@ Production Python bot for Team lb: verification panels, private AI-supported tic
 
 | Command | Who can use it | What it does |
 | --- | --- | --- |
-| `/verify` | Everyone | Gives unverified members a private link; managers are directed to the restricted #verify channel |\n| `/verifycheck` | Owner only | Tests the live website connection, syncs newly verified roles and reports permissions |
+| `/verify` | Everyone | Gives unverified members a private link; managers are directed to the restricted #verify channel |
+| `/verifycheck` | Owner only | Tests the live website connection, syncs newly verified roles and reports permissions |
 | `!verify` | Server managers | Confirms that the verification panel is in the restricted #verify channel |
 | `/ticket` | Server managers | Posts the private-ticket panel |
 | `/middleman` | Server managers | Posts the middleman request panel |
 | `/apply type:staff` or `type:stash` | Server managers | Posts the respective application panel |
-| `/giveaway item time` | Server managers | Starts a giveaway requiring verified Member role `1560003144036126853` |
+| `/giveaway item time` | Server managers | Starts a giveaway requiring Verified role `1560003144036126853` |
 | `vouch @user` | Members | Gives another member **one vouch**; each giver can vouch only once every **30 minutes**, even after a restart; no self-vouching or bots |
 | `!vouchcount @user number` | Owner only | Sets a user's vouch count. Raw Discord user ID works instead of a mention |
 | `/vouch member count` | Owner only | Slash-command equivalent for manually correcting vouch counts |
@@ -35,11 +36,12 @@ This repository uses **actual startup files**, not placeholder configuration fil
 - `main.py` — Python entry point (Wispbyte `PY_FILE=main.py`)
 - `bot.py` — Discord commands, vouches, ticket workflow and final report
 - `cloudflare_ai.py` — reusable Cloudflare REST API client
+- `verify_sync.py` — secure OAuth website sync client
 - `requirements.txt` — required Python packages
 - `Procfile` — starts the worker with `python main.py`
 - `bot.sqlite3` — local persistent database created on first run; **do not delete your existing one**
 
-Use Python **3.11 or newer**. Wispbyte's `REQUIREMENTS_FILE` is `requirements.txt`; the startup command executes `main.py`. If Wispbyte has a Git checkout, enable its `AUTO_UPDATE` or manually copy the latest `bot.py` and `cloudflare_ai.py` to the host, then restart.
+Use Python **3.11 or newer**. Wispbyte's `REQUIREMENTS_FILE` is `requirements.txt`; the startup command executes `main.py`. If Wispbyte has a Git checkout, enable its `AUTO_UPDATE` or manually copy the latest `bot.py`, `cloudflare_ai.py` and `verify_sync.py` to the host, then restart.
 
 Wispbyte private environment settings:
 
@@ -50,7 +52,8 @@ Wispbyte private environment settings:
 | `OWNER_ID` | Owner `1500253920918900883` (default is already in code) |
 | `CLOUDFLARE_ACCOUNT_ID` | Account ID is already configured in code |
 | `CLOUDFLARE_API_TOKEN` | Your private **Workers AI API token**, required for AI replies |
-| `CLOUDFLARE_AI_MODEL` | Optional, defaults to `@cf/meta/llama-3.2-1b-instruct` |\n| `VERIFY_SYNC_KEY` | Private shared website sync key if the Cloudflare verification bot uses a different Discord token; see setup below |
+| `CLOUDFLARE_AI_MODEL` | Optional, defaults to `@cf/meta/llama-3.2-1b-instruct` |
+| `VERIFY_SYNC_KEY` | Private shared website sync key if the Cloudflare verification bot uses a different Discord token; see setup below |
 | `TICKET_CATEGORY_ID` | Optional, `0` means create ticket channels at server root |
 | `DB_PATH` | Optional, default `bot.sqlite3` |
 
