@@ -565,6 +565,24 @@ async def ensure_verification_channel(guild, unverified):
         await set_verify_visibility(channel, verified_role, False)
         if guild.me:
             await set_verify_visibility(channel, guild.me, True, bot_access=True)
+
+    # Fail closed if the bot cannot actually restrict an existing channel.
+    # Otherwise everyone might see the Verify Now button.
+    required = (
+        (guild.default_role, False),
+        (unverified, True),
+        (verified_role, False),
+    )
+    if any(
+        channel.overwrites_for(target).view_channel is not expected
+        for target, expected in required
+    ):
+        logging.error(
+            "Verification channel #%s is not private. "
+            "Grant Manage Channels and retry instead of publishing an open panel.",
+            channel.name,
+        )
+        return None
     bot._verify_channel_id = channel.id
     return channel
 
