@@ -51,7 +51,7 @@ MODEL_TERMS_REQUIRED = (
 
 
 def _settings():
-    account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "c7bafe49da51ae92601521edbd5bc2f7").strip()
     token = (os.getenv("CLOUDFLARE_API_TOKEN")
              or os.getenv("CLOUDFLARE_AUTH_TOKEN", "")).strip()
     model = os.getenv("CLOUDFLARE_AI_MODEL", DEFAULT_MODEL).strip()
@@ -64,6 +64,11 @@ def _settings():
         log.error("Invalid CLOUDFLARE_AI_MODEL identifier")
         return None
     return account, token, model
+
+
+def ai_configured():
+    """True only if a real private Workers AI token is present on the bot host."""
+    return _settings() is not None
 
 
 def _error_code(data):
