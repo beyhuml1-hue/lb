@@ -150,6 +150,30 @@ class VerificationRoleTests(unittest.IsolatedAsyncioTestCase):
         )
         new_member.add_roles.assert_not_awaited()
 
+    async def test_owner_verified_account_also_loses_unverified(self):
+        guild, verified, unverified, *_ = fake_guild()
+        owner = SimpleNamespace(
+            id=team.OWNER_ID, guild=guild, bot=False,
+            roles=[verified, unverified],
+            add_roles=AsyncMock(), remove_roles=AsyncMock(),
+        )
+        with patch.object(team, "verified", side_effect=lambda m: verified in m.roles):
+            self.assertTrue(await team.reconcile_verified_role(owner, unverified))
+        owner.remove_roles.assert_awaited_once_with(
+            unverified, reason="Member completed Discord verification",
+        )
+        owner.add_roles.assert_not_awaited()
+
+    async def test_owner_without_verified_is_not_automatically_restricted(self):
+        guild, _, unverified, *_ = fake_guild()
+        owner = SimpleNamespace(
+            id=team.OWNER_ID, guild=guild, bot=False,
+            roles=[], add_roles=AsyncMock(), remove_roles=AsyncMock(),
+        )
+        self.assertFalse(await team.reconcile_verified_role(owner, unverified))
+        owner.add_roles.assert_not_awaited()
+        owner.remove_roles.assert_not_awaited()
+
     async def test_verified_role_removal_reinstates_unverified(self):
         guild, verified, unverified, *_ = fake_guild()
         previous = SimpleNamespace(id=666666666666666666, guild=guild, bot=False, roles=[verified])
