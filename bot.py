@@ -22,12 +22,16 @@ if not TOKEN or TOKEN.startswith("replace_"):
     raise SystemExit("Set your NEW Discord bot token as DISCORD_TOKEN in private host variables. Never commit or share it.")
 GUILD_ID = int(os.getenv("GUILD_ID", "1559829257952174192"))
 OWNER_ID = int(os.getenv("OWNER_ID", "1500253920918900883"))
-MEMBER_ROLE_ID = 1559829257952174199
+MEMBER_ROLE_ID = 1559829257952174199  # Existing Verified role — never create another
+UNVERIFIED_ROLE_NAME = "Unverified"
+VERIFY_CHANNEL_NAME = "verify"
 STAFF_ROLE_ID = 1559829258325594149
 VOUCH_COOLDOWN_SECONDS = 30 * 60
 AI_RESPONSE_COOLDOWN_SECONDS = 2.0
 ai_last_response = {}
 ai_busy_channels = set()
+verification_role_lock = asyncio.Lock()
+verification_setup_task = None
 TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "0"))
 DB_PATH = os.getenv("DB_PATH", "bot.sqlite3")
 COLOR = discord.Color.from_rgb(255, 185, 40)
@@ -40,6 +44,7 @@ CREATE TABLE IF NOT EXISTS cases (channel_id INTEGER PRIMARY KEY, user_id INTEGE
 CREATE TABLE IF NOT EXISTS applications (channel_id INTEGER PRIMARY KEY, answers TEXT DEFAULT '{}', recommendation TEXT DEFAULT '', decision TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS vouches (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS vouch_cooldowns (voter_id INTEGER PRIMARY KEY, last_vouch INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS verification_panels (guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS audit (at INTEGER, actor INTEGER, action TEXT, detail TEXT);
 """)
 # Upgrade existing Wispbyte databases in place without deleting open tickets.
