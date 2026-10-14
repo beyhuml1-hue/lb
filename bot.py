@@ -24,6 +24,7 @@ GUILD_ID = int(os.getenv("GUILD_ID", "1559829257952174192"))
 OWNER_ID = int(os.getenv("OWNER_ID", "1500253920918900883"))
 MEMBER_ROLE_ID = 1559829257952174199
 STAFF_ROLE_ID = 1559829258325594149
+VOUCH_COOLDOWN_SECONDS = 30 * 60
 AI_RESPONSE_COOLDOWN_SECONDS = 2.0
 ai_last_response = {}
 ai_busy_channels = set()
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS entries (message_id INTEGER, user_id INTEGER, PRIMARY
 CREATE TABLE IF NOT EXISTS cases (channel_id INTEGER PRIMARY KEY, user_id INTEGER, kind TEXT, summary TEXT, created INTEGER, status TEXT DEFAULT 'open', owner_notice INTEGER DEFAULT 0, report_target INTEGER, evidence TEXT DEFAULT '', human_requested INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS applications (channel_id INTEGER PRIMARY KEY, answers TEXT DEFAULT '{}', recommendation TEXT DEFAULT '', decision TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS vouches (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS vouch_cooldowns (voter_id INTEGER PRIMARY KEY, last_vouch INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS audit (at INTEGER, actor INTEGER, action TEXT, detail TEXT);
 """)
 # Upgrade existing Wispbyte databases in place without deleting open tickets.
@@ -64,6 +66,51 @@ def verified(member): return isinstance(member, discord.Member) and any(r.id == 
 def staff_role(guild): return guild.get_role(STAFF_ROLE_ID)
 def case_for(channel_id):
     return db.execute("SELECT * FROM cases WHERE channel_id=?", (channel_id,)).fetchone()
+
+def vouch_total(member_id):
+    row = db.execute("SELECT count FROM vouches WHERE user_id=?", (member_id,)).fetchone()
+    return int(row["count"]) if row else 0
+
+
+def add_member_vouch(voter_id, member_id, at=None):
+    """Record one vouch per voter every 30 minutes, persisted across restarts."""
+    if voter_id == member_id:
+        return "self", vouch_total(member_id), 0
+    timestamp = now() if at is None else int(at)
+    with db:
+        last = db.execute(
+            "SELECT last_vouch FROM vouch_cooldowns WHERE voter_id=?", (voter_id,)
+        ).fetchone()
+        remaining = max(0, VOUCH_COOLDOWN_SECONDS - (timestamp - last["last_vouch"])) if last else 0
+        if remaining > 0:
+            return "cooldown", vouch_total(member_id), remaining
+        db.execute(
+            "INSERT INTO vouches(user_id,count) VALUES (?,1) "
+            "ON CONFLICT(user_id) DO UPDATE SET count=count+1",
+            (member_id,),
+        )
+        db.execute(
+            "INSERT INTO vouch_cooldowns(voter_id,last_vouch) VALUES (?,?) "
+            "ON CONFLICT(voter_id) DO UPDATE SET last_vouch=excluded.last_vouch",
+            (voter_id, timestamp),
+        )
+    log_action(voter_id, "vouch_added", str(member_id))
+    return "added", vouch_total(member_id), 0
+
+
+def set_member_vouches(actor_id, member_id, count):
+    """An owner override changes the total, without resetting voters' cooldowns."""
+    if not 0 <= count <= 100000:
+        raise ValueError("Vouch count must be between 0 and 100,000.")
+    with db:
+        db.execute(
+            "INSERT INTO vouches(user_id,count) VALUES (?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET count=excluded.count",
+            (member_id, count),
+        )
+    log_action(actor_id, "vouch_count_set", f"{member_id}:{count}")
+    return vouch_total(member_id)
+
 
 async def send_completion_report(channel, case, closed_by):
     """Send the owner exactly one DM with a finished-case summary and transcript."""
@@ -423,9 +470,10 @@ async def apply(interaction:discord.Interaction,type:app_commands.Choice[str]): 
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def vouch(interaction:discord.Interaction,member:discord.Member,count:app_commands.Range[int,0,100000]):
     if not is_owner(interaction.user): return await interaction.response.send_message("Owner only.",ephemeral=True)
-    db.execute("INSERT OR REPLACE INTO vouches VALUES (?,?)",(member.id,count)); db.commit()
-    log_action(interaction.user.id,"vouch",f"{member.id}:{count}")
-    await interaction.response.send_message(f"Stored {count} reviewed vouches for {member.mention}.",ephemeral=True)
+    total = set_member_vouches(interaction.user.id, member.id, count)
+    await interaction.response.send_message(
+        f"Set {member.mention}'s vouches to **{total}**.", ephemeral=True
+    )
 
 @bot.event
 async def on_message(message):
@@ -447,6 +495,91 @@ async def on_message(message):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         return
+    if not message.guild:
+        return
+    say = re.fullmatch(r"!say(?:\\s+([\\s\\S]*))?", message.content, flags=re.IGNORECASE)
+    if say:
+        if not (is_owner(message.author) or message.author.guild_permissions.manage_guild):
+            return await message.reply(
+                "Only the owner or server managers can use !say.", mention_author=False
+            )
+        content = (say.group(1) or "").strip()
+        if not content:
+            return await message.reply(
+                "Write a message after !say.", mention_author=False
+            )
+        if len(content) > 3800:
+            return await message.reply(
+                "Keep embed messages under 3,800 characters.", mention_author=False
+            )
+        embed = discord.Embed(
+            description=content,
+            color=discord.Color.from_rgb(149, 119, 251),
+        )
+        embed.set_footer(text="Donut SMP | Team lb")
+        await message.channel.send(
+            embed=embed, allowed_mentions=discord.AllowedMentions.none()
+        )
+        return
+    edit_count = re.fullmatch(
+        r"!vouchcount\\s+(?:<@!?([0-9]{17,22})>|([0-9]{17,22}))\\s+(\\d{1,6})\\s*",
+        message.content, flags=re.IGNORECASE
+    )
+    if message.content.strip().lower().startswith("!vouchcount"):
+        if not is_owner(message.author):
+            return await message.reply(
+                "Only the owner can edit vouch counts.", mention_author=False
+            )
+        if not edit_count:
+            return await message.reply(
+                "Usage: !vouchcount @user 5 (you can also use a Discord user ID).",
+                mention_author=False,
+            )
+        member_id = int(edit_count.group(1) or edit_count.group(2))
+        count = int(edit_count.group(3))
+        if count > 100000:
+            return await message.reply("Maximum vouch count is 100,000.", mention_author=False)
+        total = set_member_vouches(message.author.id, member_id, count)
+        return await message.channel.send(
+            f"✅ Set <@{member_id}>'s vouches to **{total}**.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    vouch = re.fullmatch(
+        r"vouch\\s+<@!?([0-9]{17,22})>\\s*", message.content,
+        flags=re.IGNORECASE,
+    )
+    if vouch:
+        recipient_id = int(vouch.group(1))
+        if recipient_id == message.author.id:
+            return await message.reply(
+                "You can't vouch for yourself.", mention_author=False
+            )
+        recipient = message.guild.get_member(recipient_id)
+        if recipient is None:
+            try:
+                recipient = await message.guild.fetch_member(recipient_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return await message.reply(
+                    "That person isn't a member of this server.", mention_author=False
+                )
+        if recipient.bot:
+            return await message.reply(
+                "You can't vouch for a bot.", mention_author=False
+            )
+        outcome, count, remaining = add_member_vouch(
+            message.author.id, recipient_id
+        )
+        if outcome == "cooldown":
+            minutes = (remaining + 59) // 60
+            return await message.reply(
+                f"You can give another vouch in **{minutes} minute(s)**.",
+                mention_author=False,
+            )
+        return await message.channel.send(
+            f"✅ <@{recipient_id}> received a vouch! They now have "
+            f"**{count} vouch{'es' if count != 1 else ''}**.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
     row = case_for(message.channel.id)
     if not row or row["status"] != "open": return
     if message.author.id == OWNER_ID or (isinstance(message.author,discord.Member) and any(r.id == STAFF_ROLE_ID for r in message.author.roles)): return
